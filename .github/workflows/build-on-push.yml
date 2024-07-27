@@ -2,7 +2,7 @@ name: build-on-push
 
 on:
   pull_request:
-    paths: ['src/**', '**.gradle', 'gradle.properties', 'gradlew**', 'gradle/**']
+    paths: ['**']
 
 jobs:
   build:
@@ -11,27 +11,34 @@ jobs:
       GITHUB_ACTION_NUMBER: ${{ vars.GITHUB_RUN_NUMBER }}
       GITHUB_RUN_NUMBER: ${{ vars.GITHUB_RUN_NUMBER }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - uses: actions/setup-java@v3
+      - name: Check Path Filter
+        uses: dorny/paths-filter@v3
+        id: filter
         with:
-          java-version: '17'
-          distribution: 'adopt'
+          filters: |
+            code:
+              - 'src/**'
+              - '**.gradle'
+              - 'gradle.properties'
+              - 'gradlew**'
+              - 'gradle/**'
 
-      - name: Validate Gradle wrapper
-        uses: gradle/wrapper-validation-action@v1
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Setup Build
+        if: steps.filter.outputs.code == 'true'
+        uses: ./.github/actions/build_setup
 
       - name: Build
-        uses: gradle/gradle-build-action@v2.4.2
+        if: steps.filter.outputs.code == 'true'
+        uses: gradle/gradle-build-action@v2
         with:
-          arguments: build
+          arguments: assemble
           
       - name: Upload Artifact
+        if: steps.filter.outputs.code == 'true'
         uses: actions/upload-artifact@v4.0.0
         with:
           name: build output

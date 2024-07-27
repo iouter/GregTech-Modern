@@ -19,7 +19,9 @@ import com.gregtechceu.gtceu.api.machine.feature.IFancyUIMachine;
 import com.gregtechceu.gtceu.api.machine.feature.IMachineModifyDrops;
 import com.gregtechceu.gtceu.api.machine.trait.NotifiableItemStackHandler;
 import com.gregtechceu.gtceu.common.data.GTItems;
+import com.gregtechceu.gtceu.config.ConfigHolder;
 import com.gregtechceu.gtceu.data.lang.LangHandler;
+
 import com.lowdragmc.lowdraglib.gui.texture.ResourceTexture;
 import com.lowdragmc.lowdraglib.gui.widget.SlotWidget;
 import com.lowdragmc.lowdraglib.gui.widget.WidgetGroup;
@@ -31,7 +33,7 @@ import com.lowdragmc.lowdraglib.syncdata.annotation.Persisted;
 import com.lowdragmc.lowdraglib.syncdata.annotation.RequireRerender;
 import com.lowdragmc.lowdraglib.syncdata.field.ManagedFieldHolder;
 import com.lowdragmc.lowdraglib.utils.Position;
-import lombok.Getter;
+
 import net.minecraft.MethodsReturnNonnullByDefault;
 import net.minecraft.Util;
 import net.minecraft.core.BlockPos;
@@ -51,12 +53,16 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
+
+import lombok.Getter;
 import org.jetbrains.annotations.Nullable;
 
-import javax.annotation.ParametersAreNonnullByDefault;
 import java.util.List;
 import java.util.Set;
 import java.util.function.BiFunction;
+
+import javax.annotation.ParametersAreNonnullByDefault;
 
 /**
  * @author h3tr
@@ -65,8 +71,11 @@ import java.util.function.BiFunction;
  */
 @ParametersAreNonnullByDefault
 @MethodsReturnNonnullByDefault
-public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOutputItem, IFancyUIMachine, IMachineModifyDrops, IWorkable {
-    protected static final ManagedFieldHolder MANAGED_FIELD_HOLDER = new ManagedFieldHolder(ItemCollectorMachine.class, TieredEnergyMachine.MANAGED_FIELD_HOLDER);
+public class ItemCollectorMachine extends TieredEnergyMachine
+                                  implements IAutoOutputItem, IFancyUIMachine, IMachineModifyDrops, IWorkable {
+
+    protected static final ManagedFieldHolder MANAGED_FIELD_HOLDER = new ManagedFieldHolder(ItemCollectorMachine.class,
+            TieredEnergyMachine.MANAGED_FIELD_HOLDER);
 
     @Getter
     private static final int[] INVENTORY_SIZES = { 4, 9, 16, 25, 25 };
@@ -126,28 +135,31 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
         super(holder, tier);
         this.inventorySize = INVENTORY_SIZES[Mth.clamp(getTier(), 0, INVENTORY_SIZES.length - 1)];
         this.energyPerTick = (long) BASE_EU_CONSUMPTION * (1L << (tier - 1));
-        this.output = createoutputItemHandler();
+        this.output = createOutputItemHandler();
         this.chargerInventory = createChargerItemHandler();
         this.filterInventory = createFilterItemHandler();
 
-        maxRange = (int) Math.pow(2,tier+2);
+        maxRange = (int) Math.pow(2, tier + 2);
         range = maxRange;
         setOutputFacingItems(getFrontFacing());
     }
 
     //////////////////////////////////////
-    //*****     Initialization     *****//
+    // ***** Initialization *****//
     //////////////////////////////////////
 
     protected ItemStackTransfer createChargerItemHandler() {
         var transfer = new ItemStackTransfer();
-        transfer.setFilter(item -> GTCapabilityHelper.getElectricItem(item) != null);
+        transfer.setFilter(item -> GTCapabilityHelper.getElectricItem(item) != null ||
+                (ConfigHolder.INSTANCE.compat.energy.nativeEUToPlatformNative &&
+                        GTCapabilityHelper.getForgeEnergyItem(item) != null));
         return transfer;
     }
 
     protected ItemStackTransfer createFilterItemHandler() {
         var transfer = new ItemStackTransfer();
-       transfer.setFilter(item -> item.is(GTItems.ITEM_FILTER.asItem())||item.is(GTItems.ORE_DICTIONARY_FILTER.asItem()));
+        transfer.setFilter(
+                item -> item.is(GTItems.ITEM_FILTER.asItem()) || item.is(GTItems.ORE_DICTIONARY_FILTER.asItem()));
         return transfer;
     }
 
@@ -156,29 +168,29 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
         return MANAGED_FIELD_HOLDER;
     }
 
-    protected NotifiableItemStackHandler createoutputItemHandler() {
+    protected NotifiableItemStackHandler createOutputItemHandler() {
         return new NotifiableItemStackHandler(this, inventorySize, IO.BOTH, IO.OUT);
     }
-
-
 
     @Override
     public void onLoad() {
         super.onLoad();
         if (isRemote()) return;
 
-        if (getLevel() instanceof ServerLevel serverLevel)
-            serverLevel.getServer().tell(new TickTask(0, this::updateAutoOutputSubscription));
+        if (getLevel() instanceof ServerLevel serverLevel) {
+
+            serverLevel.getServer().tell(new TickTask(0, () -> {
+                this.updateAutoOutputSubscription();
+                this.updateCollectionSubscription();
+            }));
+        }
 
         exportItemSubs = output.addChangedListener(this::updateAutoOutputSubscription);
-
         energySubs = energyContainer.addChangedListener(() -> {
             this.updateBatterySubscription();
             this.updateCollectionSubscription();
-
         });
         chargerInventory.setOnContentsChanged(this::updateBatterySubscription);
-
     }
 
     @Override
@@ -206,7 +218,7 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
     }
 
     //////////////////////////////////////
-    //*********     Logic     **********//
+    // ********* Logic **********//
     //////////////////////////////////////
 
     public void updateCollectionSubscription() {
@@ -224,62 +236,63 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
         if (drainEnergy(false)) {
             if (aabb == null || rangeDirty) {
                 rangeDirty = false;
-                BlockPos pos1,pos2;
-                pos1 = getPos().offset(-range,0,-range);
-                pos2 = getPos().offset(range,2,range);
-                this.aabb =  AABB.of(BoundingBox.fromCorners(pos1,pos2));
+                BlockPos pos1, pos2;
+                pos1 = getPos().offset(-range, 0, -range);
+                pos2 = getPos().offset(range, 2, range);
+                this.aabb = AABB.of(BoundingBox.fromCorners(pos1, pos2));
             }
             moveItemsInRange();
             updateCollectionSubscription();
         }
     }
 
-    public void moveItemsInRange(){
-            ItemFilter filter = null;
-        if(!filterInventory.getStackInSlot(0).isEmpty())
+    public void moveItemsInRange() {
+        ItemFilter filter = null;
+        if (!filterInventory.getStackInSlot(0).isEmpty())
             filter = ItemFilter.loadFilter(filterInventory.getStackInSlot(0));
         BlockPos centerPos = self().getPos().above();
 
         List<ItemEntity> itemEntities = getLevel().getEntitiesOfClass(ItemEntity.class, aabb);
-        for(ItemEntity itemEntity: itemEntities){
-            if(!itemEntity.isAlive()) continue;
-            if(filter != null && !filter.test(itemEntity.getItem())) continue;
+        for (ItemEntity itemEntity : itemEntities) {
+            if (!itemEntity.isAlive()) continue;
+            if (filter != null && !filter.test(itemEntity.getItem())) continue;
             double distX = (centerPos.getX() + 0.5) - itemEntity.position().x;
             double distZ = (centerPos.getZ() + 0.5) - itemEntity.position().z;
-            double dist = Math.sqrt(Math.pow(distX,2) + Math.pow(distZ,2));
-            if(dist>=.7f){
-                if(itemEntity.pickupDelay==32767) continue; //INFINITE_PICKUP_DELAY = 32767
-                double dirX = distX/dist;
-                double dirZ = distZ/dist;
-                itemEntity.kjs$setMotionX(dirX*MOTION_MULTIPLIER*tier);
-                itemEntity.kjs$setMotionZ(dirZ*MOTION_MULTIPLIER*tier);
+            double dist = Math.sqrt(Math.pow(distX, 2) + Math.pow(distZ, 2));
+            if (dist >= 0.7f) {
+                if (itemEntity.pickupDelay == 32767) continue; // INFINITE_PICKUP_DELAY = 32767
+                double dirX = distX / dist;
+                double dirZ = distZ / dist;
+                Vec3 delta = itemEntity.getDeltaMovement();
+                itemEntity.setDeltaMovement(dirX * MOTION_MULTIPLIER * tier, delta.y, dirZ * MOTION_MULTIPLIER * tier);
                 itemEntity.setPickUpDelay(1);
-
             } else {
                 ItemStack stack = itemEntity.getItem();
-                if(!canFillOutput(stack)) continue;
+                if (!canFillOutput(stack)) continue;
 
                 ItemStack remainder = fillOutput(stack);
-                if(remainder.isEmpty())
+                if (remainder.isEmpty())
                     itemEntity.kill();
-                else if(stack.getCount()>remainder.getCount())
+                else if (stack.getCount() > remainder.getCount())
                     itemEntity.setItem(remainder);
             }
         }
     }
 
     private boolean canFillOutput(ItemStack stack) {
-        for (int i = 0; i < output.getSlots(); i++)
+        for (int i = 0; i < output.getSlots(); i++) {
             if (output.insertItemInternal(i, stack, true).getCount() < stack.getCount())
                 return true;
+        }
 
         return false;
     }
 
     private ItemStack fillOutput(ItemStack stack) {
-        for (int i = 0; i < output.getSlots(); i++)
+        for (int i = 0; i < output.getSlots(); i++) {
             if (output.insertItemInternal(i, stack, true).getCount() < stack.getCount())
                 return output.insertItemInternal(i, stack, false);
+        }
 
         return ItemStack.EMPTY;
     }
@@ -294,9 +307,8 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
         return false;
     }
 
-
     //////////////////////////////////////
-    //*******     Auto Output    *******//
+    // ******* Auto Output *******//
     //////////////////////////////////////
     @Override
     public void setAutoOutputItems(boolean allow) {
@@ -305,7 +317,9 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
     }
 
     @Override
-    public boolean isAllowInputFromOutputSideItems() { return false;}
+    public boolean isAllowInputFromOutputSideItems() {
+        return false;
+    }
 
     @Override
     public void setAllowInputFromOutputSideItems(boolean allow) {}
@@ -327,16 +341,17 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
 
     protected void updateAutoOutputSubscription() {
         var outputFacing = getOutputFacingItems();
-        if ((isAutoOutputItems() && !output.isEmpty()) && outputFacing != null
-                && ItemTransferHelper.getItemTransfer(getLevel(), getPos().relative(outputFacing), outputFacing.getOpposite()) != null)
-            autoOutputSubs = subscribeServerTick(autoOutputSubs, this::checkAutoOutput);
+        if ((isAutoOutputItems() && !output.isEmpty()) && outputFacing != null &&
+                ItemTransferHelper.getItemTransfer(getLevel(), getPos().relative(outputFacing),
+                        outputFacing.getOpposite()) != null)
+            autoOutputSubs = subscribeServerTick(autoOutputSubs, this::autoOutput);
         else if (autoOutputSubs != null) {
             autoOutputSubs.unsubscribe();
             autoOutputSubs = null;
         }
     }
 
-    protected void checkAutoOutput() {
+    protected void autoOutput() {
         if (getOffsetTimer() % 5 == 0) {
             if (isAutoOutputItems() && getOutputFacingItems() != null)
                 output.exportToNearby(getOutputFacingItems());
@@ -385,44 +400,46 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
     }
 
     //////////////////////////////////////
-    //**********     GUI     ***********//
+    // ********** GUI ***********//
     //////////////////////////////////////
 
-    public static BiFunction<ResourceLocation, Integer, EditableMachineUI> EDITABLE_UI_CREATOR = Util.memoize((path, inventorySize) -> new EditableMachineUI("misc", path, () -> {
-        var template = createTemplate(inventorySize).createDefault();
-        var energyBar = createEnergyBar().createDefault();
-        var batterySlot = createBatterySlot().createDefault();
+    public static BiFunction<ResourceLocation, Integer, EditableMachineUI> EDITABLE_UI_CREATOR = Util
+            .memoize((path, inventorySize) -> new EditableMachineUI("misc", path, () -> {
+                var template = createTemplate(inventorySize).createDefault();
+                var energyBar = createEnergyBar().createDefault();
+                var batterySlot = createBatterySlot().createDefault();
 
-        var energyGroup = new WidgetGroup(0, 0, energyBar.getSize().width, energyBar.getSize().height + 20);
-        batterySlot.setSelfPosition(new Position((energyBar.getSize().width - 18) / 2, energyBar.getSize().height + 1));
-        energyGroup.addWidget(energyBar);
-        energyGroup.addWidget(batterySlot);
-        var group = new WidgetGroup(0, 0,
-                Math.max(energyGroup.getSize().width + template.getSize().width + 4 + 8, 172),
-                Math.max(template.getSize().height + 8 + 30, energyGroup.getSize().height + 8));
-        var size = group.getSize();
-        energyGroup.setSelfPosition(new Position(3, (size.height - energyGroup.getSize().height) / 2));
+                var energyGroup = new WidgetGroup(0, 0, energyBar.getSize().width, energyBar.getSize().height + 20);
+                batterySlot.setSelfPosition(
+                        new Position((energyBar.getSize().width - 18) / 2, energyBar.getSize().height + 1));
+                energyGroup.addWidget(energyBar);
+                energyGroup.addWidget(batterySlot);
+                var group = new WidgetGroup(0, 0,
+                        Math.max(energyGroup.getSize().width + template.getSize().width + 4 + 8, 172),
+                        Math.max(template.getSize().height + 8 + 30, energyGroup.getSize().height + 8));
+                var size = group.getSize();
+                energyGroup.setSelfPosition(new Position(3, (size.height - energyGroup.getSize().height) / 2));
 
-        template.setSelfPosition(new Position(
-                (size.width - energyGroup.getSize().width - 4 - template.getSize().width) / 2 + 2 + energyGroup.getSize().width + 2,
-                (size.height - template.getSize().height) / 2+15));
+                template.setSelfPosition(new Position(
+                        (size.width - energyGroup.getSize().width - 4 - template.getSize().width) / 2 + 2 +
+                                energyGroup.getSize().width + 2,
+                        (size.height - template.getSize().height) / 2 + 15));
 
-
-
-        group.addWidget(energyGroup);
-        group.addWidget(template);
-        return group;
-    }, (template, machine) -> {
-        if (machine instanceof ItemCollectorMachine itemCollectorMachine) {
-            createTemplate(inventorySize).setupUI(template, itemCollectorMachine);
-            createEnergyBar().setupUI(template, itemCollectorMachine);
-            createBatterySlot().setupUI(template, itemCollectorMachine);
-            var rangeSelector = new IntInputWidget((template.getSize().width-80)/2,5,80,20, itemCollectorMachine::getRange, itemCollectorMachine::setRange);
-            rangeSelector.setMin(1);
-            rangeSelector.setMax(itemCollectorMachine.maxRange);
-            template.addWidget(rangeSelector);
-        }
-    }));
+                group.addWidget(energyGroup);
+                group.addWidget(template);
+                return group;
+            }, (template, machine) -> {
+                if (machine instanceof ItemCollectorMachine itemCollectorMachine) {
+                    createTemplate(inventorySize).setupUI(template, itemCollectorMachine);
+                    createEnergyBar().setupUI(template, itemCollectorMachine);
+                    createBatterySlot().setupUI(template, itemCollectorMachine);
+                    var rangeSelector = new IntInputWidget((template.getSize().width - 80) / 2, 5, 80, 20,
+                            itemCollectorMachine::getRange, itemCollectorMachine::setRange);
+                    rangeSelector.setMin(1);
+                    rangeSelector.setMax(itemCollectorMachine.maxRange);
+                    template.addWidget(rangeSelector);
+                }
+            }));
 
     protected static EditableUI<SlotWidget, ItemCollectorMachine> createBatterySlot() {
         return new EditableUI<>("battery_slot", SlotWidget.class, () -> {
@@ -433,17 +450,15 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
             slotWidget.setHandlerSlot(machine.chargerInventory, 0);
             slotWidget.setCanPutItems(true);
             slotWidget.setCanTakeItems(true);
-            slotWidget.setHoverTooltips(LangHandler.getMultiLang("gtceu.gui.charger_slot.tooltip", GTValues.VNF[machine.getTier()], GTValues.VNF[machine.getTier()]).toArray(new MutableComponent[0]));
+            slotWidget.setHoverTooltips(LangHandler.getMultiLang("gtceu.gui.charger_slot.tooltip",
+                    GTValues.VNF[machine.getTier()], GTValues.VNF[machine.getTier()]).toArray(new MutableComponent[0]));
         });
     }
-
-
-
 
     protected static EditableUI<WidgetGroup, ItemCollectorMachine> createTemplate(int inventorySize) {
         return new EditableUI<>("functional_container", WidgetGroup.class, () -> {
             int rowSize = (int) Math.sqrt(inventorySize);
-            WidgetGroup main = new WidgetGroup(0, 0, rowSize * 18 + 8+ 25, rowSize * 18 + 8);
+            WidgetGroup main = new WidgetGroup(0, 0, rowSize * 18 + 8 + 25, rowSize * 18 + 8);
 
             for (int y = 0; y < rowSize; y++) {
                 for (int x = 0; x < rowSize; x++) {
@@ -459,7 +474,8 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
 
             SlotWidget filterSlotWidget = new SlotWidget();
             filterSlotWidget.initTemplate();
-            filterSlotWidget.setSelfPosition(new Position(4, (main.getSize().height - filterSlotWidget.getSize().height) / 2));
+            filterSlotWidget
+                    .setSelfPosition(new Position(4, (main.getSize().height - filterSlotWidget.getSize().height) / 2));
             filterSlotWidget.setBackground(GuiTextures.SLOT, GuiTextures.FILTER_SLOT_OVERLAY);
             filterSlotWidget.setId("filter_slot");
             main.addWidget(filterSlotWidget);
@@ -484,12 +500,12 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
     }
 
     //////////////////////////////////////
-    //*******     Rendering     ********//
+    // ******* Rendering ********//
     //////////////////////////////////////
     @Override
     public ResourceTexture sideTips(Player player, Set<GTToolType> toolTypes, Direction side) {
         if (toolTypes.contains(GTToolType.WRENCH)) {
-            if (!player.isCrouching()) {
+            if (!player.isShiftKeyDown()) {
                 if (!hasFrontFacing() || side != getFrontFacing()) {
                     return GuiTextures.TOOL_IO_FACING_ROTATION;
                 }
@@ -506,11 +522,12 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
     }
 
     //////////////////////////////////////
-    //*******    Interactions   ********//
+    // ******* Interactions ********//
     //////////////////////////////////////
     @Override
-    protected InteractionResult onWrenchClick(Player playerIn, InteractionHand hand, Direction gridSide, BlockHitResult hitResult) {
-        if (!playerIn.isCrouching() && !isRemote()) {
+    protected InteractionResult onWrenchClick(Player playerIn, InteractionHand hand, Direction gridSide,
+                                              BlockHitResult hitResult) {
+        if (!playerIn.isShiftKeyDown() && !isRemote()) {
             var tool = playerIn.getItemInHand(hand);
             if (tool.getDamageValue() >= tool.getMaxDamage()) return InteractionResult.PASS;
             if (hasFrontFacing() && gridSide == getFrontFacing()) return InteractionResult.PASS;
@@ -533,18 +550,17 @@ public class ItemCollectorMachine extends TieredEnergyMachine implements IAutoOu
     }
 
     @Override
-    protected InteractionResult onSoftMalletClick(Player playerIn, InteractionHand hand, Direction gridSide, BlockHitResult hitResult) {
+    protected InteractionResult onSoftMalletClick(Player playerIn, InteractionHand hand, Direction gridSide,
+                                                  BlockHitResult hitResult) {
         var controllable = GTCapabilityHelper.getControllable(getLevel(), getPos(), gridSide);
         if (controllable != null) {
             if (!isRemote()) {
                 controllable.setWorkingEnabled(!controllable.isWorkingEnabled());
                 playerIn.sendSystemMessage(Component.translatable(controllable.isWorkingEnabled() ?
-                    "behaviour.soft_hammer.enabled" : "behaviour.soft_hammer.disabled"));
+                        "behaviour.soft_hammer.enabled" : "behaviour.soft_hammer.disabled"));
             }
             return InteractionResult.CONSUME;
         }
         return InteractionResult.PASS;
     }
-
-
 }
